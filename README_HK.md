@@ -53,3 +53,28 @@ uv pip uninstall opencv-python opencv-python-headless
 ## Réinstaller uniquement la version headless
 
 uv pip install opencv-python-headless
+
+## Docker build and push
+
+Build the image
+
+docker build \  
+ --platform linux/amd64 \
+ -f Dockerfile \
+ -t infiniflow/ragflow:latest \
+
+1. Re-tagger l'image
+
+docker tag infiniflow/ragflow:latest ghcr.io/iative/ragflow:latest
+
+2. Login et Push
+
+gh auth login --scopes "write:packages,read:packages"
+
+gh auth token | docker login ghcr.io -u IAtive --password-stdin
+
+docker push ghcr.io/iative/ragflow:latest
+
+3. Mettre à jour docker/.env
+
+RAGFLOW_IMAGE=ghcr.io/iative/ragflow:latest
