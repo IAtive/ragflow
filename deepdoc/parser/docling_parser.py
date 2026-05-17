@@ -127,9 +127,10 @@ class DoclingParser(RAGFlowPdfParser):
             self.logger.error(f"[Docling] init DocumentConverter failed: {e}")
             return False
 
-    def __images__(self, fnm, zoomin: int = 1, page_from=0, page_to=MAXIMUM_PAGE_NUMBER, callback=None):
+    def __images__(self, fnm, zoomin: int = 3, page_from=0, page_to=MAXIMUM_PAGE_NUMBER, callback=None):
         self.page_from = page_from
         self.page_to = page_to
+        self._render_scale = zoomin
         bytes_io = None
         try:
             if not isinstance(fnm, (str, PathLike)):
@@ -146,15 +147,18 @@ class DoclingParser(RAGFlowPdfParser):
             if bytes_io:
                 bytes_io.close()
 
-    def _make_line_tag(self,bbox: _BBox) -> str:
+    def _make_line_tag(self, bbox: _BBox) -> str:
         if bbox is None:
             return ""
-        x0,x1, top, bott = bbox.x0, bbox.x1, bbox.y0, bbox.y1
+        # Coordinates stored in original PDF point space (what the frontend expects for highlighting)
+        x0, x1, top, bott = bbox.x0, bbox.x1, bbox.y0, bbox.y1
         if hasattr(self, "page_images") and self.page_images and len(self.page_images) >= bbox.page_no:
-            _, page_height = self.page_images[bbox.page_no-1].size
-            top, bott = page_height-top ,page_height-bott
+            scale = getattr(self, "_render_scale", 1)
+            _, page_height_px = self.page_images[bbox.page_no - 1].size
+            pdf_height = page_height_px / scale  # convert pixel height back to PDF points
+            top, bott = pdf_height - top, pdf_height - bott
         return "@@{}\t{:.1f}\t{:.1f}\t{:.1f}\t{:.1f}##".format(
-            bbox.page_no, x0,x1, top, bott
+            bbox.page_no, x0, x1, top, bott
         )
 
     @staticmethod
@@ -172,33 +176,42 @@ class DoclingParser(RAGFlowPdfParser):
         if not poss:
             return (None, None) if need_position else None
 
-        GAP = 6
+        scale = getattr(self, "_render_scale", 1)
+        GAP = 6  # in PDF point space
         pos = poss[0]
         poss.insert(0, ([pos[0][0]], pos[1], pos[2], max(0, pos[3] - 120), max(pos[3] - GAP, 0)))
         pos = poss[-1]
-        poss.append(([pos[0][-1]], pos[1], pos[2], min(self.page_images[pos[0][-1]].size[1], pos[4] + GAP), min(self.page_images[pos[0][-1]].size[1], pos[4] + 120)))
+        last_page_h = self.page_images[pos[0][-1]].size[1] / scale  # PDF point space
+        poss.append(([pos[0][-1]], pos[1], pos[2], min(last_page_h, pos[4] + GAP), min(last_page_h, pos[4] + 120)))
         positions = []
         for ii, (pns, left, right, top, bottom) in enumerate(poss):
             if bottom <= top:
                 bottom = top + 4
             img0 = self.page_images[pns[0]]
-            x0, y0, x1, y1 = int(left), int(top), int(right), int(min(bottom, img0.size[1]))
-            
+            # Scale PDF point coords to pixel coords for the high-res page image
+            x0 = int(left * scale)
+            y0 = int(top * scale)
+            x1 = int(right * scale)
+            y1 = int(min(bottom * scale, img0.size[1]))
+
             crop0 = img0.crop((x0, y0, x1, y1))
             imgs.append(crop0)
-            if 0 < ii < len(poss)-1:
-                positions.append((pns[0] + self.page_from, x0, x1, y0, y1))
-            remain_bottom = bottom - img0.size[1]
+            if 0 < ii < len(poss) - 1:
+                # Return positions in original PDF point space (for frontend)
+                positions.append((pns[0] + self.page_from, left, right, top, bottom))
+            remain_bottom = bottom - img0.size[1] / scale  # PDF point space
             for pn in pns[1:]:
                 if remain_bottom <= 0:
                     break
                 page = self.page_images[pn]
-                x0, y0, x1, y1 = int(left), 0, int(right), int(min(remain_bottom, page.size[1]))
-                cimgp = page.crop((x0, y0, x1, y1))
+                x0 = int(left * scale)
+                x1 = int(right * scale)
+                y1 = int(min(remain_bottom * scale, page.size[1]))
+                cimgp = page.crop((x0, 0, x1, y1))
                 imgs.append(cimgp)
                 if 0 < ii < len(poss) - 1:
-                    positions.append((pn + self.page_from, x0, x1, y0, y1))
-                remain_bottom -= page.size[1]
+                    positions.append((pn + self.page_from, left, right, 0, remain_bottom))
+                remain_bottom -= page.size[1] / scale
 
         if not imgs:
             return (None, None) if need_position else None
@@ -218,20 +231,20 @@ class DoclingParser(RAGFlowPdfParser):
 
         return (pic, positions) if need_position else pic
 
+    _TEXT_LABELS = frozenset({
+        "section_header", "text", "title", "caption", "footnote", "list_item", "code",
+    })
+    _FORMULA_LABELS = frozenset({"formula", "FORMULA"})
+
     def _iter_doc_items(self, doc) -> Iterable[tuple[str, Any, Optional[_BBox]]]:
         for t in getattr(doc, "texts", []):
-            parent = getattr(t, "parent", "")
-            ref = getattr(parent, "cref", "")
-            label = getattr(t, "label", "")
-            if (label in ("section_header", "text") and ref in ("#/body",)) or label in ("list_item",):
-                text = getattr(t, "text", "") or ""
-                bbox = _extract_bbox_from_prov(t)
+            raw_label = getattr(t, "label", "")
+            label = raw_label.value if hasattr(raw_label, "value") else str(raw_label)
+            text = getattr(t, "text", "") or ""
+            bbox = _extract_bbox_from_prov(t)
+            if label in self._TEXT_LABELS:
                 yield (DoclingContentType.TEXT.value, text, bbox)
-
-        for item in getattr(doc, "texts", []):
-            if getattr(item, "label", "") in ("FORMULA",):
-                text = getattr(item, "text", "") or ""
-                bbox = _extract_bbox_from_prov(item)
+            elif label in self._FORMULA_LABELS:
                 yield (DoclingContentType.EQUATION.value, text, bbox)
 
     def _transfer_to_sections(self, doc, parse_method: str) -> list[tuple[str, ...]]:
@@ -266,11 +279,12 @@ class DoclingParser(RAGFlowPdfParser):
         page_img = self.page_images[idx]
         W, H = page_img.size
         left, top, right, bott = bbox
+        scale = getattr(self, "_render_scale", 1)
 
-        x0 = float(left)
-        y0 = float(H-top)
-        x1 = float(right)
-        y1 = float(H-bott)
+        x0 = float(left) * scale
+        y0 = float(H - top * scale)
+        x1 = float(right) * scale
+        y1 = float(H - bott * scale)
 
         x0, y0 = max(0.0, min(x0, W - 1)), max(0.0, min(y0, H - 1))
         x1, y1 = max(x0 + 1.0, min(x1, W)), max(y0 + 1.0, min(y1, H))
@@ -280,7 +294,7 @@ class DoclingParser(RAGFlowPdfParser):
         except Exception:
             return None, ""
 
-        pos = (page_no-1 if page_no>0 else 0, x0, x1, y0, y1)
+        pos = (page_no - 1 if page_no > 0 else 0, left, right, H / scale - top, H / scale - bott)
         return crop, [pos]
 
     def _transfer_to_tables(self, doc):
@@ -330,6 +344,14 @@ class DoclingParser(RAGFlowPdfParser):
             return [payload["document"]]
         if isinstance(payload.get("documents"), list):
             return [d for d in payload["documents"] if isinstance(d, dict)]
+        # docling-serve v1 format: {"output": [{"document": {...}}, ...]}
+        if isinstance(payload.get("output"), list):
+            docs = []
+            for item in payload["output"]:
+                if isinstance(item, dict) and isinstance(item.get("document"), dict):
+                    docs.append(item["document"])
+            if docs:
+                return docs
         if isinstance(payload.get("results"), list):
             docs = []
             for it in payload["results"]:
@@ -343,6 +365,109 @@ class DoclingParser(RAGFlowPdfParser):
             return docs
         return []
 
+    @staticmethod
+    def _extract_bbox_from_json_dict(item: dict, prov_attr: str = "prov") -> Optional[_BBox]:
+        prov = item.get(prov_attr)
+        if not prov:
+            return None
+        prov_item = prov[0] if isinstance(prov, list) else prov
+        if not isinstance(prov_item, dict):
+            return None
+        pn = prov_item.get("page_no")
+        bb = prov_item.get("bbox")
+        if pn is None or not isinstance(bb, dict):
+            return None
+        coords = [bb.get(attr) for attr in ("l", "t", "r", "b")]
+        if None in coords:
+            return None
+        return _BBox(page_no=int(pn), x0=coords[0], y0=coords[1], x1=coords[2], y1=coords[3])
+
+    @staticmethod
+    def _html_from_table_dict(table: dict) -> str:
+        data = table.get("data", {})
+        cells = data.get("table_cells", [])
+        if not cells:
+            return ""
+        rows: dict[int, list] = {}
+        for cell in cells:
+            r = cell.get("start_row_offset_idx", 0)
+            rows.setdefault(r, []).append(cell)
+        html = "<table>"
+        for r in sorted(rows):
+            html += "<tr>"
+            for cell in sorted(rows[r], key=lambda c: c.get("start_col_offset_idx", 0)):
+                tag = "th" if cell.get("column_header") or cell.get("row_header") else "td"
+                attrs = ""
+                if (cell.get("row_span") or 1) > 1:
+                    attrs += f' rowspan="{cell["row_span"]}"'
+                if (cell.get("col_span") or 1) > 1:
+                    attrs += f' colspan="{cell["col_span"]}"'
+                html += f"<{tag}{attrs}>{cell.get('text', '')}</{tag}>"
+            html += "</tr>"
+        html += "</table>"
+        return html
+
+    def _extract_from_json_doc(self, json_doc: dict, parse_method: str) -> tuple[list, list]:
+        sections: list[tuple[str, ...]] = []
+        tables = []
+
+        for txt in json_doc.get("texts", []):
+            if not isinstance(txt, dict):
+                continue
+            label = txt.get("label", "")
+
+            if label in self._TEXT_LABELS:
+                text = (txt.get("text") or "").strip()
+                if not text:
+                    continue
+                bbox = self._extract_bbox_from_json_dict(txt)
+                tag = self._make_line_tag(bbox) if bbox else ""
+                if parse_method in {"manual", "pipeline"}:
+                    sections.append((text, DoclingContentType.TEXT.value, tag))
+                elif parse_method == "paper":
+                    sections.append((text + tag, DoclingContentType.TEXT.value))
+                else:
+                    sections.append((text, tag))
+            elif label in self._FORMULA_LABELS:
+                text = (txt.get("text") or "").strip()
+                if not text:
+                    continue
+                bbox = self._extract_bbox_from_json_dict(txt)
+                tag = self._make_line_tag(bbox) if bbox else ""
+                if parse_method in {"manual", "pipeline"}:
+                    sections.append((text, DoclingContentType.EQUATION.value, tag))
+                elif parse_method == "paper":
+                    sections.append((text + tag, DoclingContentType.EQUATION.value))
+                else:
+                    sections.append((text, tag))
+
+        for tab in json_doc.get("tables", []):
+            if not isinstance(tab, dict):
+                continue
+            bbox = self._extract_bbox_from_json_dict(tab)
+            img, positions = None, ""
+            if bbox:
+                img, positions = self.cropout_docling_table(bbox.page_no, (bbox.x0, bbox.y0, bbox.x1, bbox.y1))
+            html = self._html_from_table_dict(tab)
+            tables.append(((img, html), positions if positions else ""))
+
+        for pic in json_doc.get("pictures", []):
+            if not isinstance(pic, dict):
+                continue
+            bbox = self._extract_bbox_from_json_dict(pic)
+            img, positions = None, ""
+            if bbox:
+                img, positions = self.cropout_docling_table(bbox.page_no, (bbox.x0, bbox.y0, bbox.x1, bbox.y1))
+            cap_list = pic.get("captions", [])
+            caption = ""
+            if cap_list and isinstance(cap_list[0], dict):
+                caption = cap_list[0].get("text", "")
+            elif cap_list:
+                caption = str(cap_list[0])
+            tables.append(((img, [caption]), positions if positions else ""))
+
+        return sections, tables
+
     def _parse_pdf_remote(
         self,
         filepath: str | PathLike[str],
@@ -353,13 +478,7 @@ class DoclingParser(RAGFlowPdfParser):
         docling_server_url: Optional[str] = None,
         request_timeout: Optional[int] = None,
     ):
-        """
-        Parses a PDF document using a remote Docling server.
-        
-        Prioritizes native chunking endpoints (/v1/chunk/source, /v1alpha/chunk/source) 
-        to prevent token overflow, with a graceful fallback to standard conversion 
-        endpoints if chunking is unavailable.
-        """
+        """Parses a PDF document using a remote Docling server."""
         server_url = self._effective_server_url(docling_server_url)
         if not server_url:
             raise RuntimeError("[Docling] DOCLING_SERVER_URL is not configured.")
@@ -377,53 +496,33 @@ class DoclingParser(RAGFlowPdfParser):
             with open(src_path, "rb") as f:
                 pdf_bytes = f.read()
 
+        try:
+            self.__images__(pdf_bytes)
+        except Exception as e:
+            self.logger.warning(f"[Docling] Local page rendering failed: {e}")
+            self.page_images = []
+
         if callback:
             callback(0.2, f"[Docling] Requesting external server: {server_url}")
 
         filename = Path(filepath).name or "input.pdf"
         b64 = base64.b64encode(pdf_bytes).decode("ascii")
         
-        # Standard payloads
-        # Standard fallback payloads (no chunking)
-        v1_payload_standard = {
+        v1_payload = {
             "options": {"from_formats": ["pdf"], "to_formats": ["json", "md", "text"]},
             "sources": [{"kind": "file", "filename": filename, "base64_string": b64}],
         }
-        v1alpha_payload_standard = {
+        v1alpha_payload = {
             "options": {"from_formats": ["pdf"], "to_formats": ["json", "md", "text"]},
-            "file_sources": [{"filename": filename, "base64_string": b64}],
-        }
-        
-        # --- NEW: Correct API Contract for Chunking ---
-        chunking_opts = {
-            "from_formats": ["pdf"], 
-            "to_formats": ["json", "md", "text"],
-            "do_chunking": True,
-            "chunking_options": {
-                "max_tokens": 512,
-                "overlap": 50,
-                "tokenizer": "sentencepiece" # Required by Docling contract
-            }
-        }
-        v1_payload_chunked = {
-            "options": chunking_opts,
-            "sources": [{"kind": "file", "filename": filename, "base64_string": b64}],
-        }
-        v1alpha_payload_chunked = {
-            "options": chunking_opts,
             "file_sources": [{"filename": filename, "base64_string": b64}],
         }
 
         errors = []
         response_json = None
-        is_chunked_response = False
 
-        # Try chunked endpoints first, then fall back to standard if the server is older
-        for endpoint, payload, chunk_flag in (
-            ("/v1/convert/source", v1_payload_chunked, True),
-            ("/v1alpha/convert/source", v1alpha_payload_chunked, True),
-            ("/v1/convert/source", v1_payload_standard, False),
-            ("/v1alpha/convert/source", v1alpha_payload_standard, False),
+        for endpoint, payload in (
+            ("/v1/convert/source", v1_payload),
+            ("/v1alpha/convert/source", v1alpha_payload),
         ):
             try:
                 resp = requests.post(
@@ -433,22 +532,9 @@ class DoclingParser(RAGFlowPdfParser):
                 )
                 if resp.status_code < 300:
                     response_json = resp.json()
-                    is_chunked_response = chunk_flag
-                    
-                    if chunk_flag:
-                        self.logger.info(f"[Docling] Successfully used native chunking on: {endpoint}")
-                    else:
-                        self.logger.info(f"[Docling] Chunking unavailable, fell back to standard: {endpoint}")
+                    self.logger.info(f"[Docling] Success on {endpoint}")
                     break
-                
-                # If chunking request is rejected (e.g., 422 Unprocessable Entity on older servers), 
-                # log it and let the loop naturally fall back to the standard payload.
-                if chunk_flag:
-                    self.logger.warning(f"[Docling] Server rejected chunking parameters: HTTP {resp.status_code}")
-                    continue
-
                 errors.append(f"{endpoint}: HTTP {resp.status_code} {resp.text[:300]}")
-                
             except Exception as exc:
                 self.logger.error(f"[Docling] Request error on {endpoint}: {exc}")
                 errors.append(f"{endpoint}: {exc}")
@@ -458,48 +544,31 @@ class DoclingParser(RAGFlowPdfParser):
 
         sections: list[tuple[str, ...]] = []
         tables = []
-        
-        # --- NEW: Handle Native Chunked Response ---
-        if is_chunked_response:
-            # The chunking endpoint returns an array of chunk items
-            chunks = response_json if isinstance(response_json, list) else response_json.get("results", [])
-            for chunk_data in chunks:
-                if not isinstance(chunk_data, dict):
-                    continue
-                # Depending on the exact docling-serve spec, the text might be nested
-                chunk_text = chunk_data.get("text", "")
-                if not chunk_text and isinstance(chunk_data.get("chunk"), dict):
-                    chunk_text = chunk_data["chunk"].get("text", "")
-                
-                if isinstance(chunk_text, str) and chunk_text.strip():
-                    # Feed the pre-sliced chunks directly into RAGFlow's expected format
-                    sections.extend(self._sections_from_remote_text(chunk_text, parse_method=parse_method))
-                    
-            if callback:
-                callback(0.95, f"[Docling] Native chunks received: {len(sections)}")
-            return sections, tables
 
-        # --- FALLBACK: Standard RAGFlow parsing for older docling servers ---
         docs = self._extract_remote_document_entries(response_json)
         if not docs:
             raise RuntimeError("[Docling] remote response does not contain parsed documents.")
 
         for doc in docs:
-            md = doc.get("md_content")
-            txt = doc.get("text_content")
-            if isinstance(md, str) and md.strip():
-                sections.extend(self._sections_from_remote_text(md, parse_method=parse_method))
-            elif isinstance(txt, str) and txt.strip():
-                sections.extend(self._sections_from_remote_text(txt, parse_method=parse_method))
-
             json_content = doc.get("json_content")
-            if isinstance(json_content, dict):
-                md_fallback = json_content.get("md_content")
-                if isinstance(md_fallback, str) and md_fallback.strip() and not sections:
-                    sections.extend(self._sections_from_remote_text(md_fallback, parse_method=parse_method))
+            if isinstance(json_content, dict) and (json_content.get("texts") or json_content.get("tables")):
+                s, t = self._extract_from_json_doc(json_content, parse_method)
+                sections.extend(s)
+                tables.extend(t)
+            else:
+                md = doc.get("md_content")
+                txt = doc.get("text_content")
+                if isinstance(md, str) and md.strip():
+                    sections.extend(self._sections_from_remote_text(md, parse_method=parse_method))
+                elif isinstance(txt, str) and txt.strip():
+                    sections.extend(self._sections_from_remote_text(txt, parse_method=parse_method))
+                elif isinstance(json_content, dict):
+                    md_fallback = json_content.get("md_content")
+                    if isinstance(md_fallback, str) and md_fallback.strip():
+                        sections.extend(self._sections_from_remote_text(md_fallback, parse_method=parse_method))
 
         if callback:
-            callback(0.95, f"[Docling] Remote sections: {len(sections)}")
+            callback(0.95, f"[Docling] Remote sections: {len(sections)}, tables: {len(tables)}")
         return sections, tables
 
     def parse_pdf(
@@ -552,7 +621,7 @@ class DoclingParser(RAGFlowPdfParser):
             callback(0.1, f"[Docling] Converting: {src_path}")
 
         try:
-            self.__images__(str(src_path), zoomin=1)
+            self.__images__(str(src_path))
         except Exception as e:
             self.logger.warning(f"[Docling] render pages failed: {e}")
 

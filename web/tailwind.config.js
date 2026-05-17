@@ -1,8 +1,11 @@
+import { createRequire } from 'module';
+
+const require = createRequire(import.meta.url);
 const { fontFamily } = require('tailwindcss/defaultTheme');
 
 /** @type {import('tailwindcss').Config} */
 
-module.exports = {
+export default {
   darkMode: ['selector'],
   content: [
     './src/pages/**/*.tsx',
