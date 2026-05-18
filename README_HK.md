@@ -17,9 +17,12 @@ DOC_ENGINE=infinity docker compose -f docker-compose-base.yml --profile infinity
 cd /Users/hakimkramdi/Documents/IATIVE/Workspace/ragflow
 source .venv/bin/activate
 
-export PYTHONPATH=$(pwd)
-export DOC_ENGINE=infinity
-export DOCLING_SERVER_URL=http://89.47.51.40:5001
+export PYTHONPATH=$(pwd) \
+export DOC_ENGINE=infinity \
+export DOCLING_OCR_ENGINE=rapidocr \
+export DOCLING_OCR_LANG=fr,en \
+export DOCLING_TABLE_MODE=accurate \
+export DOCLING_SERVER_URL=http://localhost:5001
 
 # Lancer directement (hot-reload possible, logs lisibles)
 
@@ -28,8 +31,12 @@ python api/ragflow_server.py
 5. Démarrer le task executor (terminal 2) :
 
 source .venv/bin/activate
-export PYTHONPATH=$(pwd)
-export DOC_ENGINE=infinity
+
+export PYTHONPATH=$(pwd) \
+export DOC_ENGINE=infinity \
+export DOCLING_OCR_ENGINE=rapidocr \
+export DOCLING_OCR_LANG=fr,en \
+export DOCLING_TABLE_MODE=accurate \
 export DOCLING_SERVER_URL=http://localhost:5001
 
 python rag/svr/task_executor.py 0

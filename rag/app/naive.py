@@ -165,6 +165,9 @@ def by_docling(filename, binary=None, from_page=0, to_page=MAXIMUM_PAGE_NUMBER, 
         delete_output=bool(int(os.environ.get("DOCLING_DELETE_OUTPUT", 1))),
         docling_server_url=os.environ.get("DOCLING_SERVER_URL", ""),
         parse_method=parse_method,
+        ocr_engine=os.environ.get("DOCLING_OCR_ENGINE", "").strip() or None,
+        ocr_lang=os.environ.get("DOCLING_OCR_LANG", "").strip() or None,
+        table_mode=os.environ.get("DOCLING_TABLE_MODE", "").strip() or None,
     )
     return sections, tables, pdf_parser
 

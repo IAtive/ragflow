@@ -477,6 +477,9 @@ class DoclingParser(RAGFlowPdfParser):
         parse_method: str = "raw",
         docling_server_url: Optional[str] = None,
         request_timeout: Optional[int] = None,
+        ocr_engine: Optional[str] = None,
+        ocr_lang: Optional[str] = None,
+        table_mode: Optional[str] = None,
     ):
         """Parses a PDF document using a remote Docling server."""
         server_url = self._effective_server_url(docling_server_url)
@@ -507,13 +510,22 @@ class DoclingParser(RAGFlowPdfParser):
 
         filename = Path(filepath).name or "input.pdf"
         b64 = base64.b64encode(pdf_bytes).decode("ascii")
-        
+
+        base_options: dict = {"from_formats": ["pdf"], "to_formats": ["json", "md", "text"]}
+        # ocr_engine maps to ocr_preset (ocr_engine is deprecated in docling-serve)
+        if ocr_engine:
+            base_options["ocr_preset"] = ocr_engine
+        if ocr_lang:
+            base_options["ocr_lang"] = [lang.strip() for lang in ocr_lang.split(",") if lang.strip()]
+        if table_mode:
+            base_options["table_mode"] = table_mode
+
         v1_payload = {
-            "options": {"from_formats": ["pdf"], "to_formats": ["json", "md", "text"]},
+            "options": base_options,
             "sources": [{"kind": "file", "filename": filename, "base64_string": b64}],
         }
         v1alpha_payload = {
-            "options": {"from_formats": ["pdf"], "to_formats": ["json", "md", "text"]},
+            "options": base_options,
             "file_sources": [{"filename": filename, "base64_string": b64}],
         }
 
@@ -577,13 +589,16 @@ class DoclingParser(RAGFlowPdfParser):
         binary: BytesIO | bytes | None = None,
         callback: Optional[Callable] = None,
         *,
-        output_dir: Optional[str] = None, 
-        lang: Optional[str] = None,        
-        method: str = "auto",             
+        output_dir: Optional[str] = None,
+        lang: Optional[str] = None,
+        method: str = "auto",
         delete_output: bool = True,
         parse_method: str = "raw",
         docling_server_url: Optional[str] = None,
         request_timeout: Optional[int] = None,
+        ocr_engine: Optional[str] = None,
+        ocr_lang: Optional[str] = None,
+        table_mode: Optional[str] = None,
     ):
         self.outlines = extract_pdf_outlines(binary if binary is not None else filepath)
 
@@ -599,6 +614,9 @@ class DoclingParser(RAGFlowPdfParser):
                 parse_method=parse_method,
                 docling_server_url=server_url,
                 request_timeout=request_timeout,
+                ocr_engine=ocr_engine,
+                ocr_lang=ocr_lang,
+                table_mode=table_mode,
             )
 
         if binary is not None:
