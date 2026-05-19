@@ -65,10 +65,7 @@ uv pip install opencv-python-headless
 
 Build the image
 
-docker build \  
- --platform linux/amd64 \
- -f Dockerfile \
- -t infiniflow/ragflow:latest \
+docker build --platform linux/amd64 -f Dockerfile -t infiniflow/ragflow:latest .
 
 1. Re-tagger l'image
 
@@ -76,10 +73,11 @@ docker tag infiniflow/ragflow:latest ghcr.io/iative/ragflow:latest
 
 2. Login et Push
 
+If not already logged:
 gh auth login --scopes "write:packages,read:packages"
-
 gh auth token | docker login ghcr.io -u IAtive --password-stdin
 
+Then push
 docker push ghcr.io/iative/ragflow:latest
 
 3. Mettre à jour docker/.env
